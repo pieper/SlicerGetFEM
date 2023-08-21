@@ -1,0 +1,21 @@
+"""
+Run this demo to generate 200 vtk files:
+
+https://github.com/getfem-doc/getfem/blob/master/interface/tests/python/demo_finite_strain_plasticity_3D.py
+
+Load them in Slicer and run the script below to animate the scalar fields.
+
+"""
+
+go = True
+
+nodes = list(slicer.util.getNodes("finite*").values())
+count = 0
+while go:
+	for n in nodes:
+		n.GetDisplayNode().SetVisibility(False)
+	nodes[count].GetDisplayNode().SetVisibility(True)
+	count +=1
+	if count >= len(nodes):
+		count = 0
+	slicer.app.processEvents()

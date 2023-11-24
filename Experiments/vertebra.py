@@ -7,7 +7,7 @@ exec(open("vertebra.py").read())
 
 exec(open("../util_addon.py").read())
 
-loadSteps = 3
+loadSteps = 10
 loadValue = 15
 
 baseDir = "/mnt/slicer/pieper/vertebra"
@@ -29,9 +29,34 @@ getFEMDir = slicer.util.tempDirectory()
 meshArrays = numpy.array([meshNodePoints, meshPointIDs], dtype=object)
 numpy.save(f"{getFEMDir}/vertebra.npy", meshArrays, allow_pickle=True)
 
-getFEMScript = "vertebra.getfem.py"
-getFEMScriptPath = getFEMDir + "/" + getFEMScript
-open(getFEMScriptPath, "w").write(f'''
+sequenceNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode", "Loading sequence")
+sequenceBrowserNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", "Load Browser")
+sequenceBrowserNode.AddSynchronizedSequenceNode(sequenceNode)
+slicer.modules.sequences.toolBar().setActiveBrowserNode(sequenceBrowserNode)
+
+def loadAnalysisResult(exitCode, exitStatus, process, step):
+    if exitCode != 0:
+        print(exitCode, exitStatus)
+        print(process.readAllStandardOutput())
+        print(process.readAllStandardError())
+        return
+    properties = {
+        "coordinateSystem" : slicer.vtkMRMLStorageNode.CoordinateSystemRAS,
+        "name" : f"load step {step}"
+    }
+    stepMesh = slicer.util.loadNodeFromFile(f"{getFEMDir}/vertebra-result.mesh_{step}.vtk",
+                                            filetype="ModelFile", properties=properties)
+    sequenceNode.SetDataNodeAtValue(stepMesh, str(step))
+
+
+processesByStep = {}
+for step in range(loadSteps):
+
+    load = step / (loadSteps-1) * loadValue
+
+    getFEMScript = f"vertebra.getfem_{step}.py"
+    getFEMScriptPath = getFEMDir + "/" + getFEMScript
+    open(getFEMScriptPath, "w").write(f'''
 """  This is based on the GetFEM demo_tripod.py and lung.py
 """
 import numpy as np
@@ -42,7 +67,7 @@ import getfem as gf
 #incompressible = False # ensure that degree > 1 when incompressible is on..
 
 degree = 1
-linear = True
+linear = False
 incompressible = False # ensure that degree > 1 when incompressible is on..
 
 meshNodePoints, meshPointIDs = np.load("/work/vertebra.npy", allow_pickle=True)
@@ -92,79 +117,64 @@ Nu=0.3
 Lambda = E*Nu/((1+Nu)*(1-2*Nu))
 Mu =E/(2*(1+Nu))
 
-
-for step in range({loadSteps}):
-
-    md = gf.Model('real')
-    md.add_fem_variable('u', mfu)
-    if linear:
-        md.add_initialized_data('cmu', Mu)
-        md.add_initialized_data('clambda', Lambda)
-        md.add_isotropic_linearized_elasticity_brick(mim, 'u', 'clambda', 'cmu')
-        if incompressible:
-            md.add_fem_variable('p', mfp)
-            md.add_linear_incompressibility_brick(mim, 'u', 'p')
+md = gf.Model('real')
+md.add_fem_variable('u', mfu)
+if linear:
+    md.add_initialized_data('cmu', Mu)
+    md.add_initialized_data('clambda', Lambda)
+    md.add_isotropic_linearized_elasticity_brick(mim, 'u', 'clambda', 'cmu')
+    if incompressible:
+        md.add_fem_variable('p', mfp)
+        md.add_linear_incompressibility_brick(mim, 'u', 'p')
+else:
+    md.add_initialized_data('params', [Lambda, Mu]);
+    if incompressible:
+        lawname = 'Incompressible Mooney Rivlin';
+        md.add_finite_strain_elasticity_brick(mim, lawname, 'u', 'params')
+        md.add_fem_variable('p', mfp);
+        md.add_finite_strain_incompressibility_brick(mim, 'u', 'p');
     else:
-        md.add_initialized_data('params', [Lambda, Mu]);
-        if incompressible:
-            lawname = 'Incompressible Mooney Rivlin';
-            md.add_finite_strain_elasticity_brick(mim, lawname, 'u', 'params')
-            md.add_fem_variable('p', mfp);
-            md.add_finite_strain_incompressibility_brick(mim, 'u', 'p');
-        else:
-            lawname = 'SaintVenant Kirchhoff';
-            md.add_finite_strain_elasticity_brick(mim, lawname, 'u', 'params');
+        lawname = 'SaintVenant Kirchhoff';
+        md.add_finite_strain_elasticity_brick(mim, lawname, 'u', 'params');
 
-    # apply load to top of vertebra
-    md.add_initialized_data('VolumicData', [0,0,-10]);
-    md.add_source_term_brick(mim, 'u', 'VolumicData');
+# apply load to top of vertebra
+md.add_initialized_data('VolumicData', [0,0,-10]);
+md.add_source_term_brick(mim, 'u', 'VolumicData');
 
-    load = step / ({loadSteps}-1) * {loadValue}
-    md.set_variable('VolumicData', [0.,0,load]);
+md.set_variable('VolumicData', [0.,0,{load}]);
 
-    # Attach the bottom of vertebra to plate
-    md.add_Dirichlet_condition_with_multipliers(mim, 'u', mfu, DIRICHLET_BOUNDARY);
+# Attach the bottom of vertebra to plate
+md.add_Dirichlet_condition_with_multipliers(mim, 'u', mfu, DIRICHLET_BOUNDARY);
 
-    print('running solve...')
-    md.solve('noisy', 'max iter', 1);
-    U = md.variable('u');
-    print(step, load, 'solve done!')
+print('running solve...')
+md.solve('noisy', 'max iter', 1);
+U = md.variable('u');
+print({step}, {load}, 'solve done!')
 
-    mfdu=gf.MeshFem(m,1)
-    mfdu.set_fem(gf.Fem('FEM_PK_DISCONTINUOUS(3,1)'))
-    if linear:
-      VM = md.compute_isotropic_linearized_Von_Mises_or_Tresca('u','clambda','cmu', mfdu);
-    else:
-      VM = md.compute_finite_strain_elasticity_Von_Mises(lawname, 'u', 'params', mfdu);
-    print('Von Mises range: ', VM.min(), VM.max())
+mfdu=gf.MeshFem(m,1)
+mfdu.set_fem(gf.Fem('FEM_PK_DISCONTINUOUS(3,1)'))
+if linear:
+  VM = md.compute_isotropic_linearized_Von_Mises_or_Tresca('u','clambda','cmu', mfdu);
+else:
+  VM = md.compute_finite_strain_elasticity_Von_Mises(lawname, 'u', 'params', mfdu);
+print('Von Mises range: ', VM.min(), VM.max())
 
-    # export results to VTK
-    fileName = 'vertebra-result.mesh_'+str(step)+'.vtk'
-    mfu.export_to_vtk(fileName, 'ascii', mfdu,  VM, 'Von Mises Stress', mfu, U, 'Displacement')
+# export results to VTK
+fileName = 'vertebra-result.mesh_'+str({step})+'.vtk'
+mfu.export_to_vtk(fileName, 'ascii', mfdu,  VM, 'Von Mises Stress', mfu, U, 'Displacement')
 
 gf.memstats()
-''')
+    ''')
 
-cmd = f"docker run --rm -v {getFEMDir}:/work -t -i getfemdoc/getfem:v5.4 /venv/bin/python3 /work/{getFEMScript}"
-print(cmd)
-os.system(cmd)
+    cmd = f"/usr/bin/docker run --rm -v {getFEMDir}:/work getfemdoc/getfem:v5.4 /venv/bin/python3 /work/{getFEMScript}"
+    process = qt.QProcess()
+    onFinished = lambda exitCode, exitStatus, process=process, step=step: loadAnalysisResult(exitCode, exitStatus, process, step)
+    process.connect("finished(int, QProcess::ExitStatus)", onFinished)
+    process.start(cmd.split()[0], cmd.split()[1:])
+    processesByStep[step] = process
 
-properties = {
-    "coordinateSystem" : slicer.vtkMRMLStorageNode.CoordinateSystemRAS
-}
+    print(cmd)
 
-# Create a sequence of loads
-sequenceNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode", "Loading sequence")
-
-for step in range(loadSteps):
-    properties['name'] = f"load step {step}"
-    stepMesh = slicer.util.loadNodeFromFile(f"{getFEMDir}/vertebra-result.mesh_{step}.vtk",
-                                            filetype="ModelFile", properties=properties)
-    sequenceNode.SetDataNodeAtValue(stepMesh, str(step))
-
-sequenceBrowserNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", "Load Browser")
-sequenceBrowserNode.AddSynchronizedSequenceNode(sequenceNode)
-slicer.modules.sequences.toolBar().setActiveBrowserNode(sequenceBrowserNode)
 
 
 TODO = """

@@ -10,7 +10,8 @@ exec(open("../util_addon.py").read())
 loadSteps = 10
 loadValue = 15
 
-baseDir = "/mnt/slicer/pieper/vertebra"
+#baseDir = "/mnt/slicer/pieper/vertebra"
+baseDir = "/Users/pieper/data/vertebra"
 
 try:
     slicer.util.getNode("Cropped*3145mm")
